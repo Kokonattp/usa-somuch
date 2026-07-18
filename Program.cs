@@ -156,6 +156,22 @@ namespace ClaudeUsageWidget
 
     static class UsageClient
     {
+        // Read at most `cap` bytes from a stream, then stop. Guards against an
+        // oversized/hostile HTTP body OOM-ing the process before JSON parsing.
+        static string ReadCapped(System.IO.Stream s, int cap)
+        {
+            var buf = new byte[8192];
+            var ms = new System.IO.MemoryStream();
+            int n;
+            while ((n = s.Read(buf, 0, buf.Length)) > 0)
+            {
+                if (ms.Length + n > cap)
+                    throw new WebException("usage response exceeds size cap");
+                ms.Write(buf, 0, n);
+            }
+            return System.Text.Encoding.UTF8.GetString(ms.ToArray());
+        }
+
         // Only the generic limits[] array is parsed; the rest of the (undocumented)
         // response schema rotates and must not be relied on.
         public static UsageSnapshot Fetch(string token)
@@ -163,6 +179,10 @@ namespace ClaudeUsageWidget
             var req = (HttpWebRequest)WebRequest.Create("https://api.anthropic.com/api/oauth/usage");
             req.Method = "GET";
             req.Timeout = 20000;
+            // Never follow a redirect: HttpWebRequest re-sends custom headers (incl. the
+            // Bearer token) to the redirect target, and this endpoint is undocumented —
+            // a 3xx to another host would leak the token. Treat any 3xx as an error.
+            req.AllowAutoRedirect = false;
             req.Headers["Authorization"] = "Bearer " + token;
             req.Headers["anthropic-beta"] = "oauth-2025-04-20";
             req.UserAgent = "claude-usage-widget-win/1.0";
@@ -170,8 +190,13 @@ namespace ClaudeUsageWidget
             try
             {
                 using (var resp = (HttpWebResponse)req.GetResponse())
-                using (var sr = new StreamReader(resp.GetResponseStream()))
-                    json = sr.ReadToEnd();
+                {
+                    if ((int)resp.StatusCode >= 300 && (int)resp.StatusCode < 400)
+                        throw new WebException("unexpected redirect from usage endpoint");
+                    // Cap the body so a hostile/oversized response can't exhaust memory.
+                    // The real payload is a few KB; 1 MB is generous headroom.
+                    json = ReadCapped(resp.GetResponseStream(), 1024 * 1024);
+                }
             }
             catch (WebException ex)
             {
@@ -1055,9 +1080,14 @@ namespace ClaudeUsageWidget
                 Directory.CreateDirectory(dir);
                 AddAccount(System.IO.Path.Combine(dir, ".credentials.json"));
                 // quoted set "VAR=..." — a space in the profile path must not split the command
+                // WorkingDirectory = the app-owned dir (not the widget's CWD, e.g. Downloads):
+                // cmd resolves the bare `claude` command from the current directory first, so a
+                // planted claude.exe/.bat in the launch folder would otherwise run. dir is created
+                // by us this instant and contains no attacker binary.
                 Process.Start(new ProcessStartInfo("cmd.exe",
                     "/k title Claude Login && set \"CLAUDE_CONFIG_DIR=" + dir + "\"" +
-                    " && echo กำลังเปิด Claude Code ใน config แยก - พิมพ์ /login แล้วเลือกบัญชีที่ต้องการ && claude"));
+                    " && echo กำลังเปิด Claude Code ใน config แยก - พิมพ์ /login แล้วเลือกบัญชีที่ต้องการ && claude")
+                { WorkingDirectory = dir });
             });
             // one clickable switch entry per tracked account, rebuilt on open
             accMenu.DropDownOpening += delegate
@@ -1115,7 +1145,14 @@ namespace ClaudeUsageWidget
                 _watcher = new FileSystemWatcher(dir, "*.jsonl");
                 _watcher.IncludeSubdirectories = true;
                 _watcher.NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.FileName;
-                FileSystemEventHandler onActivity = delegate { _lastActivity = DateTime.Now; _fetchQueued = true; };
+                // Marshal onto the UI thread: _lastActivity/_fetchQueued are read by the
+                // timer and OnPaint there. A raw 8-byte DateTime write from the watcher
+                // thread isn't atomic on 32-bit, so update it where everything else reads it.
+                FileSystemEventHandler onActivity = delegate
+                {
+                    try { BeginInvoke((MethodInvoker)delegate { _lastActivity = DateTime.Now; _fetchQueued = true; }); }
+                    catch { /* form closing / handle gone — safe to drop */ }
+                };
                 _watcher.Changed += onActivity;
                 _watcher.Created += onActivity;
                 _watcher.EnableRaisingEvents = true;
@@ -1133,6 +1170,15 @@ namespace ClaudeUsageWidget
         {
             try
             {
+                // Validate the target is a real credentials file BEFORE overwriting the live
+                // token — refuse to clobber ~\.claude\.credentials.json with junk (the source
+                // can be any drag-dropped/picked .json). The live file is backed up below, but
+                // don't even start the swap on an invalid source.
+                if (Credentials.LoadFrom(acc.CredPath) == null)
+                {
+                    Toast.Pop("Claude Usage", L("ไฟล์บัญชีนี้ไม่ใช่ credentials ที่ใช้ได้ — ยกเลิกการสลับ", "That account file isn't a valid credentials file — switch cancelled"), Color.FromArgb(226, 102, 102));
+                    return;
+                }
                 var live = Credentials.Path;
                 var mainSlot = System.IO.Path.Combine(Settings.Dir, "accounts", "main", ".credentials.json");
                 Directory.CreateDirectory(System.IO.Path.GetDirectoryName(mainSlot));
@@ -1351,7 +1397,7 @@ namespace ClaudeUsageWidget
             // tray tooltip: account + every limit + next reset, all at a glance (max 63 chars)
             var sess = snap.Limits.FirstOrDefault(l => l.Kind == "session");
             string tt = (_account.Length > 0 ? _account.Split('@')[0] + " · " : "")
-                + string.Join(" ", snap.Limits.Select(l => l.Label[0] + l.Percent.ToString() + "%").ToArray())
+                + string.Join(" ", snap.Limits.Select(l => (string.IsNullOrEmpty(l.Label) ? "?" : l.Label.Substring(0, 1)) + l.Percent.ToString() + "%").ToArray())
                 + (sess != null ? " · reset " + sess.ResetsAt.ToLocalTime().ToString("HH:mm") : "");
             _tray.Text = tt.Length > 63 ? tt.Substring(0, 63) : tt;
 
