@@ -1,0 +1,16 @@
+# build output
+ClaudeUsageWidget.exe
+*.pdb
+*.exe
+
+# local runtime data (never commit — may contain personal usage/paths)
+history.csv
+settings.json
+*.credentials.json
+
+# editor / OS cruft
+.vs/
+.idea/
+*.user
+Thumbs.db
+desktop.ini
