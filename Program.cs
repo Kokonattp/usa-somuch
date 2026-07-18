@@ -1173,6 +1173,13 @@ namespace ClaudeUsageWidget
 
         void AddAccount(string path)
         {
+            // ';' is the account-list separator — a path containing one would corrupt
+            // the stored list (and split into bogus paths on reload). Reject it.
+            if (string.IsNullOrEmpty(path) || path.Contains(";"))
+            {
+                Toast.Pop("Claude Usage", L("path ของไฟล์มีอักขระ ';' ไม่รองรับ", "File path contains ';' — not supported"), Color.FromArgb(226, 102, 102));
+                return;
+            }
             if ((";" + _settings.Accounts + ";").Contains(";" + path + ";")) return;
             _settings.Accounts = string.IsNullOrEmpty(_settings.Accounts) ? path : _settings.Accounts + ";" + path;
             _settings.Save();

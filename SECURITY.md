@@ -23,6 +23,9 @@
 | Untrusted image → `Bitmap` | ยอมรับความเสี่ยงต่ำ — GDI+ เคยมี CVE จากไฟล์ภาพประดิษฐ์ แต่ผู้ใช้เลือกไฟล์เอง ไม่ใช่ไฟล์จากภายนอก |
 | Credential backup สะสม | แก้แล้ว — เก็บเฉพาะ 5 ไฟล์ล่าสุด, ลบที่เหลืออัตโนมัติ |
 | Resource leak (Image/Timer) | จัดการแล้ว — dispose ภาพเดิมก่อนโหลดใหม่ |
+| Account list injection (path มี `;`) | แก้แล้ว — ปฏิเสธ path ที่มี `;` (ตัวคั่นรายการบัญชี) กันรายการเพี้ยน |
+| Secrets/token hardcode ในซอร์ส | ไม่มี — สแกนทั้งไฟล์แล้วสะอาด, network ออกที่ `api.anthropic.com` โฮสต์เดียว |
+| ข้อมูลส่วนตัวหลุดใน git | ไม่มี — `.gitignore` กัน exe/creds/history/settings; git history สะอาดตั้งแต่ commit แรก |
 
 ## ข้อจำกัดที่ผู้ใช้ควรรู้ (ไม่ใช่ช่องโหว่ของแอป)
 
