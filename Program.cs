@@ -151,7 +151,12 @@ namespace ClaudeUsageWidget
         public DateTime FetchedAt;
     }
 
-    class RateLimitedException : Exception { }
+    class RateLimitedException : Exception
+    {
+        // Server-suggested wait parsed from the Retry-After header, if any.
+        public TimeSpan? RetryAfter;
+        public RateLimitedException(TimeSpan? retryAfter = null) { RetryAfter = retryAfter; }
+    }
     class UnauthorizedException : Exception { }
 
     static class UsageClient
@@ -170,6 +175,27 @@ namespace ClaudeUsageWidget
                 ms.Write(buf, 0, n);
             }
             return System.Text.Encoding.UTF8.GetString(ms.ToArray());
+        }
+
+        // Parse a 429's Retry-After header. RFC 7231 allows either delta-seconds
+        // (e.g. "120") or an HTTP-date. Returns null if absent/unparseable so the
+        // caller can fall back to a fixed backoff. Never returns a negative span.
+        static TimeSpan? ParseRetryAfter(HttpWebResponse resp)
+        {
+            var raw = resp.Headers["Retry-After"];
+            if (string.IsNullOrEmpty(raw)) return null;
+            raw = raw.Trim();
+            int secs;
+            if (int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out secs))
+                return TimeSpan.FromSeconds(Math.Max(0, secs));
+            DateTimeOffset when;
+            if (DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture,
+                    DateTimeStyles.AssumeUniversal, out when))
+            {
+                var delta = when - DateTimeOffset.Now;
+                return delta > TimeSpan.Zero ? delta : TimeSpan.Zero;
+            }
+            return null;
         }
 
         // Only the generic limits[] array is parsed; the rest of the (undocumented)
@@ -201,7 +227,7 @@ namespace ClaudeUsageWidget
             catch (WebException ex)
             {
                 var http = ex.Response as HttpWebResponse;
-                if (http != null && (int)http.StatusCode == 429) throw new RateLimitedException();
+                if (http != null && (int)http.StatusCode == 429) throw new RateLimitedException(ParseRetryAfter(http));
                 if (http != null && ((int)http.StatusCode == 401 || (int)http.StatusCode == 403)) throw new UnauthorizedException();
                 throw;
             }
@@ -1320,10 +1346,22 @@ namespace ClaudeUsageWidget
                     snap = UsageClient.Fetch(creds.AccessToken);
                     status = (IsActive ? "live · updated " : "updated ") + snap.FetchedAt.ToString("HH:mm:ss");
                 }
-                catch (RateLimitedException)
+                catch (RateLimitedException rle)
                 {
-                    status = "rate limited — backoff " + BackoffMinutes + "m";
-                    _backoffUntil = DateTime.Now.AddMinutes(BackoffMinutes);
+                    // Honour the server's Retry-After when present, but clamp to a sane
+                    // window (1 min .. 1 hr) so a bogus/huge value can't freeze the widget;
+                    // fall back to the fixed backoff when the header is absent.
+                    var wait = TimeSpan.FromMinutes(BackoffMinutes);
+                    if (rle.RetryAfter.HasValue)
+                    {
+                        var r = rle.RetryAfter.Value;
+                        if (r < TimeSpan.FromMinutes(1)) r = TimeSpan.FromMinutes(1);
+                        if (r > TimeSpan.FromHours(1)) r = TimeSpan.FromHours(1);
+                        wait = r;
+                    }
+                    int mins = (int)Math.Ceiling(wait.TotalMinutes);
+                    status = "rate limited — backoff " + mins + "m";
+                    _backoffUntil = DateTime.Now.Add(wait);
                 }
                 catch (UnauthorizedException)
                 {
