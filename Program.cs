@@ -2104,7 +2104,13 @@ namespace ClaudeUsageWidget
         {
             if (l.Percent >= 90) return Color.FromArgb(226, 102, 102);
             var ef = ElapsedFrac(l);
-            if (ef == null || ef.Value < 0.03) return BarColor(l.Percent);
+            // Early-window grace: the elapsed fraction is a tiny denominator right after
+            // a reset, so a few % of usage spikes the pace ratio into red — a false alarm
+            // while 90%+ of quota is still free. Suppress pace colouring until enough of
+            // the window has passed (session: ~50 min of 5h; weekly: ~5h of 7d) and fall
+            // back to plain percentage colouring.
+            double grace = l.Kind == "session" ? 0.17 : 0.03;
+            if (ef == null || ef.Value < grace) return BarColor(l.Percent);
             double ratio = l.Percent / (ef.Value * 100);
             if (ratio <= 1.0) return Color.FromArgb(92, 190, 140);   // ahead of the clock
             if (ratio <= 1.6) return Color.FromArgb(230, 178, 86);   // faster than the clock
